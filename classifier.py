@@ -43,7 +43,7 @@ Takes a categorical column data from a dataframe and reduces the dimensionality
                 s.append(v)
 
         for i, s in enumerate(newSeries):
-            data.loc[:, f"{col}_{i}"] = pd.Series(s, index=data.index)
+            data.loc[:, "{}_{}".format(col, i)] = pd.Series(s, index=data.index)
         return
     else:
         print("Not yet implemented...")
@@ -54,7 +54,7 @@ def str_to_num(data, col: str) -> None:
 Maps categorical data to a number to allow it's use in a Random Forest Classifier
 """
     if not col in data.columns:
-        print(f"Error: {data.columns} does not include {col}")
+        print("Error: {} does not include {}".format(data.columns, col))
     # Empty dictionary will be built dynamically to contain the full mapping
     mapping = {}
 
@@ -81,7 +81,7 @@ Maps categorical data to a number to allow it's use in a Random Forest Classifie
             newSeries.append(x)
 
     # Add new fully numeric series to the original DataFrame
-    data.loc[:, f"{col}_numbers"] = pd.Series(newSeries, index=data.index)
+    data.loc[:, "{}_numbers".format(col)] = pd.Series(newSeries, index=data.index)
 
     return
 
@@ -113,11 +113,11 @@ for filename in os.listdir(DATA_DIRECTORY):
     if filename.endswith(".csv"):
         data_dict[filename[:-4]] = pd.read_csv(filename)
 
-print(f"Time taken now up to {time.time() - start} seconds")
+print("Time taken now up to {} seconds".format(time.time() - start))
 
 # Print out head of each table to test that it has worked
 for title, table in data_dict.items():
-    print(f"    -{title}")
+    print("    -{}".format(title))
 
 ########################################################################
 # SECTION TWO                                                          #
@@ -145,7 +145,6 @@ for student in tqdm(data_dict["studentInfo"]["id_student"]):
     student_assess_count[student] = []
     student_vle_count[student] = []
 
-print(f"Time taken now up to {time.time() - start} seconds")
 
 # These dictionaries will contain the information needed to properly weight and record info about each assessment
 print("Loading assessment data")
@@ -172,7 +171,6 @@ for _, row in tqdm(data_dict["assessments"].iterrows()): #(index, Series)
 
     assessment_marks[id_assess] = [] # Empty list to record student performances at this assessment
 
-print(f"Time taken now up to {time.time() - start} seconds")
 
 ########################################################################
 # SECTION THREE                                                        #
@@ -194,19 +192,21 @@ print(f"Time taken now up to {time.time() - start} seconds")
 
 # Go through a for loop to look at all assessments on a per student basis
 print("Counting assessments for each student")
-for _, row in tqdm(data_dict["studentAssessment"].iterrows()):
+# Adding extra variables allows tqdm to print out a pretty progress bar for us - part 1
+assess_iterations = len(data_dict["studentAssessment"])
+assess_iterator = data_dict["studentAssessment"].iterrows()
+for _ in tqdm(range(assess_iterations)):
+    _, row = next(assess_iterator)
     student_assess_count[row.pop("id_student")].append(row)
+    assessment_marks[row["id_assessment"]].append(row["score"])
 
-print(f"Time taken now up to {time.time() - start} seconds")
-
-print("Counting vle data for each student")
-iterations = len(data_dict["studentVle"])
-iterator = data_dict["studentVle"].iterrows()
-for _ in tqdm(range(iterations)):
-    i, row = next(iterator)
-    student_vle_count[row.pop("id_student")].append(row)
-
-print(f"Time taken now up to {time.time() - start} seconds")
+#print("Counting vle data for each student")
+## Adding extra variables allows tqdm to print out a pretty progress bar for us - part 2
+#vle_iterations = len(data_dict["studentVle"])
+#vle_iterator = data_dict["studentVle"].iterrows()
+#for _ in tqdm(range(vle_iterations)):
+#    _, row = next(vle_iterator)
+#    student_vle_count[row.pop("id_student")].append(row)
 
 # Create a single dataframe of all relevant data to pass to algorithm
 print("Adding registration info to dataframe")
@@ -215,19 +215,22 @@ for column in data_dict["studentRegistration"].columns:
     if column != "id_student":
         students.loc[:, column] = pd.Series(data_dict["studentRegistration"][column], index=students.index)
 
-print(f"Time taken now up to {time.time() - start} seconds")
         
 # Add columns based on assessment performance
 # Num. of assessments done
-
+mean = lambda marks: sum(marks)/len(marks) if len(marks) > 0 else 0
+assess_mean = {id_assess:mean(assessment_marks[id_assess]) for id_assess in assessment_marks}
+var = lambda marks, mean: sum([(m - mean)**2 for m in marks])/len(marks) if len(marks) > 0 else 0
+assess_var  = {id_assess:var(assessment_marks[id_assess]) for id_assess in assessment_marks}
         
 # Average score on assessments
-print("Averaging assessment scores")
+print("Averaging assessment scores for each student")
 # This is not done with a list comprehension as that is unwieldly in terms of checking that valid inputs are used
 assessment_count = []
 average_scores = []
 weighted_scores = []
 exam_score = []
+avg_var = []
 
 for stu in students["id_student"]:
     total = 0
@@ -235,6 +238,7 @@ for stu in students["id_student"]:
     num = 0
     exam_count = 0
     exam_total = 0
+    variance = 0
     for mark in student_assess_count[stu]:
         score = mark["score"]
         if not np.isnan(score):
@@ -253,14 +257,19 @@ for stu in students["id_student"]:
                 weighted_total += score * (tma[id_assess] + cma[id_assess])/100 # Here the score is weighted
                 
             num += 1
+
+            # Check how this student averages against other students who did this assessment too
+            variance += (score - assess_mean[id_assess])/assess_var[id_assess]
             
     # To prevent division by zero
     if num == 0:
         average_scores.append(0)
         weighted_scores.append(0)
+        avg_var.append(0)
     else:
         average_scores.append(total/num)
         weighted_scores.append(weighted_total/num)
+        avg_var.append(variance/num)
 
     if exam_count == 0:
         exam_score.append(0)
@@ -268,14 +277,15 @@ for stu in students["id_student"]:
         exam_score.append(exam_total/exam_count)
     assessment_count.append(num)
 
-print(f"Time taken now up to {time.time() - start} seconds")
+print("Time taken now up to {time.time() - start} seconds")
 
 students.loc[:, "assess_count"] = pd.Series(assessment_count, index=students.index)
 students.loc[:, "avg_score"] = pd.Series(average_scores, index=students.index)
 students.loc[:, "weighted_scores"] = pd.Series(weighted_scores, index=students.index)
 students.loc[:, "exam_score"] = pd.Series(exam_score, index=students.index)
+students.loc[:, "avg_var"] = pd.Series(avg_var, index=students.index)
 
-print(f"Time taken now up to {time.time() - start} seconds")
+print("Time taken now up to {time.time() - start} seconds")
 
 ########################################################################
 # SECTION FOUR                                                         #
@@ -289,25 +299,25 @@ print(f"Time taken now up to {time.time() - start} seconds")
 # Split dataset into training data and test data - this is a standard way of splitting data as per https://www.datacamp.com/community/tutorials/random-forests-classifier-python#building
 print("Splitting data")
 # Select default values
-features = ["avg_score", "assess_count", "weighted_scores", "exam_score"]
+features = ["avg_score", "assess_count", "weighted_scores", "exam_score", "avg_var"]
 
 # Add extra values that have been encoded
 encFeats = []#"region", "imd_band", "highest_education", "gender"]
 ntsFeats = ["region", "imd_band", "highest_education", "gender"]
 for feat in encFeats:
-    print(f"Encoding {feat}")
+    print("Encoding {}".format(feat))
     encode(students, feat)
     for i in range(OutCats):
-        features.append(f"{feat}_{i}")
+        features.append("{}_{}".format(feat, i))
         
 for s in ntsFeats:
     str_to_num(students, s)
-    features.append(f"{s}_numbers")
+    features.append("{}_numbers".format(s))
 
 # This is the final DataFrame from which we create a training and testing set    
 X = students[features]
 
-print(f"Time taken now up to {time.time() - start} seconds")
+print("Time taken now up to {time.time() - start} seconds")
 
 # Library expects numerical labels so convert them using this mapping
 results_mapper = {"Withdrawn":0, "Fail":1, "Pass":2, "Distinction":3}
@@ -320,12 +330,11 @@ print("Preparing training")
 rf_scores = []
 rf_sizes = range(10, 11)
 for n in rf_sizes:
-    print(f"  size = {n}")
     rf = RandomForestClassifier(n_estimators=n, random_state=42)
     rf.fit(X_train, y_train)
     rf_scores.append(rf.score(X_test, y_test))
 
-print(f"Time taken now up to {time.time() - start} seconds")
+print("Time taken now up to {time.time() - start} seconds")
 
 # Analyse data
 from matplotlib import pyplot as plt
@@ -334,6 +343,7 @@ plt.title("Feature Importance")
 plt.ylabel("Importance")
 plt.xticks(range(len(features)), features, rotation = 45)
 
-print(f"Time taken now up to {time.time() - start} seconds")
+print("Time taken now up to {time.time() - start} seconds")
 
-plt.show()
+plt.savefig("features")
+#plt.show()
