@@ -221,7 +221,7 @@ for column in data_dict["studentRegistration"].columns:
 mean = lambda marks: sum(marks)/len(marks) if len(marks) > 0 else 0
 assess_mean = {id_assess:mean(assessment_marks[id_assess]) for id_assess in assessment_marks}
 var = lambda marks, mean: sum([(m - mean)**2 for m in marks])/len(marks) if len(marks) > 0 else 0
-assess_var  = {id_assess:var(assessment_marks[id_assess]) for id_assess in assessment_marks}
+assess_var  = {id_assess:var(assessment_marks[id_assess], assess_mean[id_assess]) for id_assess in assessment_marks}
         
 # Average score on assessments
 print("Averaging assessment scores for each student")
@@ -232,7 +232,8 @@ weighted_scores = []
 exam_score = []
 avg_var = []
 
-for stu in students["id_student"]:
+
+for stu in tqdm(students["id_student"]):
     total = 0
     weighted_total = 0
     num = 0
@@ -299,7 +300,7 @@ print("Time taken now up to {time.time() - start} seconds")
 # Split dataset into training data and test data - this is a standard way of splitting data as per https://www.datacamp.com/community/tutorials/random-forests-classifier-python#building
 print("Splitting data")
 # Select default values
-features = ["avg_score", "assess_count", "weighted_scores", "exam_score", "avg_var"]
+features = ["avg_score", "assess_count", "weighted_scores", "exam_score"]
 
 # Add extra values that have been encoded
 encFeats = []#"region", "imd_band", "highest_education", "gender"]
@@ -334,16 +335,14 @@ for n in rf_sizes:
     rf.fit(X_train, y_train)
     rf_scores.append(rf.score(X_test, y_test))
 
-print("Time taken now up to {time.time() - start} seconds")
 
 # Analyse data
 from matplotlib import pyplot as plt
 plt.bar(range(len(rf.feature_importances_)), rf.feature_importances_)
 plt.title("Feature Importance")
 plt.ylabel("Importance")
-plt.xticks(range(len(features)), features, rotation = 45)
+plt.xticks(range(len(features)), features, rotation = 25)
 
-print("Time taken now up to {time.time() - start} seconds")
 
 plt.savefig("features")
 #plt.show()
