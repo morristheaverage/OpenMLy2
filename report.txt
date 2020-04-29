@@ -1,0 +1,27 @@
+Machine Learning Report/Plan
+
+*Notes on dataset*
+Many students fail to complete assessments.
+Around 10% of students are included twice as they sign up for multiple courses.
+Some assessment scores are empty (nan as opposed to zero) - if not filled in default
+to zero
+In some modules there are no exam scores for any students
+
+*Method*
+create all potential data points including:
+- info about student
+- assessment scores
+- vle interactions
+
+**categorical data**
+some features in studentInfo are categorical
+various methods of converting these
+1) highest_education and module_choice are converted into three single bit
+features that encode the discrete category options
+2) range data such as imd_band and age ranges are represented by a sensibly chosen
+median value. e.g. imd_band of 40-50% becomes 45; age ranges (0-35, 35-55, 55+)
+became (25, 45, 65)
+3) region can be turned into 4 features showing it's normalised performance at
+attaining each type of final_result
+
+Various methods of deciding which features to keep and which to remove
