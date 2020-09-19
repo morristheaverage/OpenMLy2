@@ -1,348 +1,555 @@
+#########################################################################
+#                                                                       #
+#   ####     ####    ####                                               #
+#   #####   #####    ####                                               #
+#   #############    ####                                               #
+#   #### ### ####    ####                                               #
+#   ####     ####    ####                                               #
+#   ####     ####    ##########                                         #
+#   ####     ####    ##########                                         #
+#                                                                       #
+#########################################################################
+
 import numpy as np
 import pandas as pd
 import os
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-import numbers
-import time
 from tqdm import tqdm
+from collections import defaultdict
+from sklearn.model_selection import train_test_split
 
-# Assuming that data is in same directory as code
+def howto():
+    """This function will print an explanation of how the program is broken
+    into various chunks, allowing for faster running within the IDLE environment
+    """
+    print('Run the howto() function to view this again.\n')
+    print('Program currently runs with the following function calls:')
+    print('\t1) loadData() loads the csv files from the location specified in DATA_DIRECTORY and stores them in the dictionary called data;')
+    print('\t2) gatherAssInfo() creates a dictionary assInfo containing information about each assessment in assessments.csv;')
+    print('\t3) countStuMarks() builds two dictionaries storing assessment performances for each student on coursework and exams, respectively;')
+    print('\t4) enrollmentCount() builds the enrollment module showing how many students are enrolled in each module;')
+    print('\t5) assNorms() calculates mean and variance data for each assessment so that student score can be normalised;')
+    print('\t6) countVle() counts totals of vle interactions per student')
+    print('\t6) coallesce() uses the data from previous steps to create a new dataframe, dataset, where categorical features are converted to numerical ones.')
+    print('\t7) datasetClean() drops the unnecessary columns from dataset')
+    print('\t8) normalise() normalises non-binary features in dataset')
+    print('\t9) Then various models and feature selections occur')
+
+#########################################################################
+# SECTION ONE                                                           #
+# ===========                                                           #
+#                                                                       #
+# In this section we load the csv files in to memory so they are        #
+# available for processing in the rest of the program.                  #
+#                                                                       #
+# We expect to load in the following files:                             #
+#   -assessments.csv                                                    #
+#   -courses.csv                                                        #
+#   -studentAssessment.csv                                              #
+#   -studentInfo.csv                                                    #
+#   -studentRegistration.csv                                            #
+#   -studentVle.csv                                                     #
+#   -vle.csv                                                            #
+#                                                                       #
+#########################################################################
+
+# Import data from local directory
 DATA_DIRECTORY = os.getcwd()
-OutCats = 4 # Magic number = dimension of encoded features
 
-def encode(data, col: str) -> None:
-    """
-Takes a categorical column data from a dataframe and reduces the dimensionality
-"""
-    if "final_result" in data.columns:
-        # We can create a simple vector to encode the data
-        # We map the input column to strings to ensure a consistent type for np.unique
-        oldDims, newDims = np.unique(data[col].transform(lambda k: str(k))), np.unique(data["final_result"])
-        newDimIndex = {dim:i for i, dim in enumerate(newDims)}
-        
-        mapping = {o:[0 for _ in newDims] for o in oldDims}
-        
-        # Sum results to create the new vectors
-        for _, row in data.iterrows():
-            # Cast row[col] to string in case nan. Temporary solution and might be better to use a defaultDict
-            mapping[str(row[col])][newDimIndex[row["final_result"]]] += 1
+# We will store each pandas dataframe in a dictionary
+data = {}
+def loadData():             # Step 1
+    loadbar = tqdm(os.listdir(DATA_DIRECTORY))
+    loadbar.set_description('Reading csv files')
+    for filename in loadbar:
+        # Load all csv files and save with suitable name
+        if filename.endswith('.csv'):
+            data[filename[:-4]] = pd.read_csv(filename)
+    del loadbar
 
-        # Normalise data
-        print("Normalising")
-        for cat, vector in mapping.items():
-            total = sum(vector)
-            for i in range(len(vector)):
-                vector[i] /= total
-        print(mapping)
+    for title in data:
+        print("    -{}".format(title))
 
-        newSeries = [[] for _ in range(len(newDims))]
-        for _, cat in data[col].items():
-            vector = mapping[str(cat)]
-            for v, s in zip(vector, newSeries):
-                s.append(v)
+#########################################################################
+# SECTION TWO                                                           #
+# ===========                                                           #
+#                                                                       #
+# We convert various categorical features into numerical data:          #
+#   -specific module has 22 categories e.g. AAA 2013B                   #
+#       solution is 5 binary features - year (13/14), month(B/J) and    #
+#       3 single bit features to encode the 7 module codes              #
+#   -age_band: simply pick a reasonable number within the range         #
+#       25, 45 or 65 years old                                          #
+#   -region:                                                            #
+#       each region can be expressed as 4 features representing a       #
+#       unique binary code                                              #
+#   -highest_education:                                                 #
+#       can be encoded with three bits                                  #
+#   -imd_band:                                                          #
+#       each option is a range so simply use median value for each      #
+#       we set missing values to 50                                     #
+#   -disability: Y = 1, N = 0                                           #
+#   -gender: M = 1, F = 0                                               #
+#                                                                       #
+#########################################################################
 
-        for i, s in enumerate(newSeries):
-            data.loc[:, "{}_{}".format(col, i)] = pd.Series(s, index=data.index)
-        return
-    else:
-        print("Not yet implemented...")
-        return
+# Firstly compile data from studentAssessment.csv calculating weighted coursework scores and exam scores
 
-def str_to_num(data, col: str) -> None:
-    """
-Maps categorical data to a number to allow it's use in a Random Forest Classifier
-"""
-    if not col in data.columns:
-        print("Error: {} does not include {}".format(data.columns, col))
-    # Empty dictionary will be built dynamically to contain the full mapping
-    mapping = {}
+# Need to build a dictionary of assessment info
+assInfo = {}
+expectedAss = defaultdict(list)     # (module, presentation): [assessment_ids...]
+def gatherAssInfo():        # Step 2
+    assBar = tqdm(iterable=data['assessments'].iterrows(), total=len(data['assessments']))
+    assBar.set_description('Load assessment info')
+    for _, row in assBar:
+        assInfo[row['id_assessment']] = {
+            'code_module': row['code_module'],
+            'code_presentation': row['code_presentation'],
+            'type': row['assessment_type'],
+            'weight': row['weight'],
+            'scores': [] # Empty list to help normalise scores
+            }
+        expectedAss[(row['code_module'], row['code_presentation'])].append(row['id_assessment'])
+    del assBar
 
-    # New column to ultimately be added to data
-    newSeries = []
+courseworkMarks = defaultdict(list)
+examMarks = defaultdict(list)
 
-    # Iteratively build up mapping and newSeries together
-    counter = 0
-    for x in data[col]:
-        # Only need to convert if nan
-        if (not isinstance(x, numbers.Number)) or np.isnan(x):
-            # Always consider string representation of x for consistency
-            key = str(x)
-            # key might not exist in mapping yet
-            try:
-                y = mapping[key]
-            except KeyError:
-                mapping[key] = counter
-                counter += 1
-                y = mapping[key]
-            finally:
-                newSeries.append(y)
+# Now we can fill the dictionaries creating lists of assessments
+# for each student. A student can be registered for as many as 5 courses
+# so it is important to check which course the assessment is for
+def countStuMarks():        # Step 3
+    marksBar = tqdm(iterable=data['studentAssessment'].iterrows(), total=len(data['studentAssessment']))
+    marksBar.set_description('Record marks for each student')
+    for _, row in marksBar:
+        ass = row['id_assessment']
+        stu = row['id_student']
+        module, presentation = assInfo[ass]['code_module'], assInfo[ass]['code_presentation']
+
+        score, weight = row['score'], assInfo[ass]['weight']
+        if np.isnan(score):
+            score = 0
+        if assInfo[ass]['type'] == 'Exam':
+            examMarks[(stu, module, presentation)].append((score, weight, ass)) # Weight for exam should be 100%
         else:
-            newSeries.append(x)
+            courseworkMarks[(stu, module, presentation)].append((score, weight, ass))
+        assInfo[ass]['scores'].append(score)
+    del marksBar
 
-    # Add new fully numeric series to the original DataFrame
-    data.loc[:, "{}_numbers".format(col)] = pd.Series(newSeries, index=data.index)
+# We can caluclate the mean and variance on each assessment to help normalise scores
+# but first we need enrollment rates in each course
+enrollment = defaultdict(int)
+def enrollmentCount():      # Step 4
+    enrollBar = tqdm(iterable=data['studentInfo'].iterrows(), total=len(data['studentAssessment']))
+    enrollBar.set_description('Counting enrollment per course')
+    for _, row in enrollBar:
+        enrollment[(row['code_module'], row['code_presentation'])] += 1
+    del enrollBar
 
-    return
+def assNorms():             # Step 5
+    normDataAssBar = tqdm(assInfo)
+    normDataAssBar.set_description('Calculate mean and variance of each assessment')
+    for ass in normDataAssBar:
+        assData = assInfo[ass]
+        scores = assData['scores']
+        mod, pres = assData['code_module'], assData['code_presentation']
+        tookAss = len(scores)
+        if tookAss == 0:
+            assInfo[ass]['mean'], assInfo[ass]['var'] = 0, 0
+        else:
+            # Calculate mean
+            mean = sum(scores)/tookAss
+            # Calculate variance
+            var = sum((score - mean)**2 for score in scores)/tookAss
+            assInfo[ass]['mean'], assInfo[ass]['var'] = mean, var
+    del normDataAssBar
 
-########################################################################
-# SECTION ONE                                                          #
-# ===========                                                          #
-#                                                                      #
-# In this section we load the csv files in to memory so they are       #
-# available for processing in the rest of the program.                 #
-#                                                                      #
-# We expect to load in the following files:                            #
-#   -assessments.csv                                                   #
-#   -courses.csv                                                       #
-#   -studentAssessment.csv                                             #
-#   -studentInfo.csv                                                   #
-#   -studentRegistration.csv                                           #
-#   -studentVle.csv                                                    #
-#   -vle.csv                                                           #
-#                                                                      #
-########################################################################
+vleCounts = defaultdict(int)
+def countVle():             # Step 6
+    vleBar = tqdm(iterable=data['studentVle'].iterrows(), total=len(data['studentVle']))
+    vleBar.set_description('Counting vle interactions')
+    for _, row in vleBar:
+        vleCounts[row['id_student']] += row['sum_click']
 
-# This dictionary will contain every DataFrame object
-data_dict = {}
-start = time.time()
+# Secondly add new features to data['studentInfo'] by converting existing
+# categorical data in the table to numeric data and adding data from other tables
+def weightedAvg(marks: list) -> float:  # Helper function for Step 6
+    """Given a list of (score, weight, ...) tuples
+    return the weighted average of all assessments
+    """
+    totalWeight = sum(x[1] for x in marks)
+    if len(marks) == 0 or totalWeight == 0:
+        return 0.0
 
-# Load every .csv file into memory
-print("Loading all .csv files")
-for filename in os.listdir(DATA_DIRECTORY):
-    if filename.endswith(".csv"):
-        data_dict[filename[:-4]] = pd.read_csv(filename)
-
-print("Time taken now up to {} seconds".format(time.time() - start))
-
-# Print out head of each table to test that it has worked
-for title, table in data_dict.items():
-    print("    -{}".format(title))
-
-########################################################################
-# SECTION TWO                                                          #
-# ===========                                                          #
-#                                                                      #
-# In this section we create several dictionary structures that will    #
-# allow us to easily collect data such as average assessment marks and #
-# behaviour in VLEs.                                                   #
-#                                                                      #
-# The dictionaries we create are:                                      #
-#   -student_assess_count (id_student, [assessments completed...])     #
-#   -student_vle_count (id_student, [vle behaviour recorded...])       #
-#   -tma, cma (id_assessment, weighting)                               #
-#   -assessment_marks (id_assessment, [marks achieved on this...])     #
-#                                                                      #
-########################################################################
-
-# This dictionary will record the assessments completed by each student
-print("Initialising student dictionaries")
-student_assess_count = {}
-student_vle_count = {}
-
-# Should be more efficient than doing two dictionary comprehensions
-for student in tqdm(data_dict["studentInfo"]["id_student"]):
-    student_assess_count[student] = []
-    student_vle_count[student] = []
+    return sum(x[0]*x[1] for x in marks)/totalWeight
 
 
-# These dictionaries will contain the information needed to properly weight and record info about each assessment
-print("Loading assessment data")
-tma = {}
-cma = {}
-exams = []
+def coallesce():            # Step 7
+    year, month = [], []
+    modBit0, modBit1, modBit2 = [], [], []
+    eduBit0, eduBit1, eduBit2 = [], [], []
+    regBit0, regBit1, regBit2, regBit3 = [], [], [], []
 
-assessment_marks = {}
+    stuInfobar = tqdm(iterable=dataset.iterrows(), total=len(dataset))
+    stuInfobar.set_description('Converting module feature')
+    for i, row in stuInfobar:
+        # Add features calculated from other tables
+        stuID = row['id_student']
+        module = row['code_module']
+        presentation = row['code_presentation']
 
-for _, row in tqdm(data_dict["assessments"].iterrows()): #(index, Series)
-    id_assess = row["id_assessment"]
-    assess_type = row["assessment_type"]
-    weight = row["weight"]
-    
-    if assess_type == "TMA":
-        tma[id_assess] = weight
-        cma[id_assess] = 0
-    elif assess_type == "CMA":
-        tma[id_assess] = 0
-        cma[id_assess] = weight
-    else:
-        # All exams are weigted as 100%
-        exams.append(row["id_assessment"])
+        courseworkTuples = courseworkMarks[(stuID, module, presentation)]
+        examTuples = examMarks[(stuID, module, presentation)]
 
-    assessment_marks[id_assess] = [] # Empty list to record student performances at this assessment
-
-
-########################################################################
-# SECTION THREE                                                        #
-# =============                                                        #
-#                                                                      #
-# In this section we count and calculate the various metrics that will #
-# be used to build our model. The dictionaries created above will be   #
-# able to record the data already in the DataFrames and will then      #
-# allow various statistics to be calculated. Finally we create a       #
-# single DataFrame (students) of all the data for the model.           #
-#                                                                      #
-# The data we will be collecting are:                                  #
-#   -avg_score       An unweighted average of a student's assessments  #
-#   -assess_count    The number of assessments done                    #
-#   -weighted_scores The weighted average of a student's assessments   #
-#   -exam_score      Students performance on exams                     #
-#                                                                      #
-########################################################################
-
-# Go through a for loop to look at all assessments on a per student basis
-print("Counting assessments for each student")
-# Adding extra variables allows tqdm to print out a pretty progress bar for us - part 1
-assess_iterations = len(data_dict["studentAssessment"])
-assess_iterator = data_dict["studentAssessment"].iterrows()
-for _ in tqdm(range(assess_iterations)):
-    _, row = next(assess_iterator)
-    student_assess_count[row.pop("id_student")].append(row)
-    assessment_marks[row["id_assessment"]].append(row["score"])
-
-#print("Counting vle data for each student")
-## Adding extra variables allows tqdm to print out a pretty progress bar for us - part 2
-#vle_iterations = len(data_dict["studentVle"])
-#vle_iterator = data_dict["studentVle"].iterrows()
-#for _ in tqdm(range(vle_iterations)):
-#    _, row = next(vle_iterator)
-#    student_vle_count[row.pop("id_student")].append(row)
-
-# Create a single dataframe of all relevant data to pass to algorithm
-print("Adding registration info to dataframe")
-students = data_dict["studentInfo"]
-for column in data_dict["studentRegistration"].columns:
-    if column != "id_student":
-        students.loc[:, column] = pd.Series(data_dict["studentRegistration"][column], index=students.index)
-
-        
-# Add columns based on assessment performance
-# Num. of assessments done
-mean = lambda marks: sum(marks)/len(marks) if len(marks) > 0 else 0
-assess_mean = {id_assess:mean(assessment_marks[id_assess]) for id_assess in assessment_marks}
-var = lambda marks, mean: sum([(m - mean)**2 for m in marks])/len(marks) if len(marks) > 0 else 0
-assess_var  = {id_assess:var(assessment_marks[id_assess], assess_mean[id_assess]) for id_assess in assessment_marks}
-        
-# Average score on assessments
-print("Averaging assessment scores for each student")
-# This is not done with a list comprehension as that is unwieldly in terms of checking that valid inputs are used
-assessment_count = []
-average_scores = []
-weighted_scores = []
-exam_score = []
-avg_var = []
-
-
-for stu in tqdm(students["id_student"]):
-    total = 0
-    weighted_total = 0
-    num = 0
-    exam_count = 0
-    exam_total = 0
-    variance = 0
-    for mark in student_assess_count[stu]:
-        score = mark["score"]
-        if not np.isnan(score):
-            total += score
-            
-            id_assess = mark["id_assessment"]
-
-            # Record assessment mark
-            assessment_marks[id_assess].append(score)
-
-            # Gather information to create an average of this student's performance
-            if id_assess in exams:
-                exam_total += score
-                exam_count += 1
+        expected = expectedAss[(module, presentation)]
+        for ass in expected:
+            # If any expected assignment is not recorded...
+            if assInfo[ass]['type'] == 'Exam':
+                if not any(True if tup[2] == ass else False for tup in examTuples):
+                    examTuples.append((0, 100, ass))
             else:
-                weighted_total += score * (tma[id_assess] + cma[id_assess])/100 # Here the score is weighted
-                
-            num += 1
+                if not any(True if tup[2] == ass else False for tup in courseworkTuples):
+                    # Record mark as zero
+                    courseworkTuples.append((0, assInfo[ass]['weight'], ass))
 
-            # Check how this student averages against other students who did this assessment too
-            variance += (score - assess_mean[id_assess])/assess_var[id_assess]
+
+        # mu = assInfo[tup[2]]['mean']
+        # sigma = np.sqrt(assInfo[tup[2]]['var'])
+        # score = tup[0]
+        # weight = tup[1]
+        # normScore = (score - mu) / sigma
+        normCourseworkTuples = []
+        for tup in courseworkTuples:
+            mean, var = assInfo[tup[2]]['mean'], assInfo[tup[2]]['var']
+            if var <= 0:
+                normCourseworkTuples.append((0, 0))
+            else:
+                normCourseworkTuples.append((
+                    (tup[0] - mean) / np.sqrt(var),
+                    tup[1]
+                    ))
+
+        normExamTuples = []
+        for tup in examTuples:
+            mean, var = assInfo[tup[2]]['mean'], assInfo[tup[2]]['var']
+            if var == 0:
+                normExamTuples.append((0, 0))
+            else:
+                normExamTuples.append((
+                    (tup[0] - mean) / np.sqrt(var),
+                    tup[1]
+                ))
+
+        dataset.loc[i, 'courseworkScore'] = weightedAvg(courseworkTuples)
+        dataset.loc[i, 'examScore'] = weightedAvg(examTuples)
+
+        nca = weightedAvg(normCourseworkTuples)
+        if np.isnan(nca):
+            print('\n', normCourseworkTuples)
+            print('vs\n', courseworkTuples)
             
-    # To prevent division by zero
-    if num == 0:
-        average_scores.append(0)
-        weighted_scores.append(0)
-        avg_var.append(0)
-    else:
-        average_scores.append(total/num)
-        weighted_scores.append(weighted_total/num)
-        avg_var.append(variance/num)
+        dataset.loc[i, 'normCourseworkScore'] = nca
+        dataset.loc[i, 'normExamScore'] = weightedAvg(normExamTuples)
 
-    if exam_count == 0:
-        exam_score.append(0)
-    else:
-        exam_score.append(exam_total/exam_count)
-    assessment_count.append(num)
+        # Vle counts
+        dataset.loc[i, 'vleCount'] = vleCounts[stuID]
 
-print("Time taken now up to {time.time() - start} seconds")
-
-students.loc[:, "assess_count"] = pd.Series(assessment_count, index=students.index)
-students.loc[:, "avg_score"] = pd.Series(average_scores, index=students.index)
-students.loc[:, "weighted_scores"] = pd.Series(weighted_scores, index=students.index)
-students.loc[:, "exam_score"] = pd.Series(exam_score, index=students.index)
-students.loc[:, "avg_var"] = pd.Series(avg_var, index=students.index)
-
-print("Time taken now up to {time.time() - start} seconds")
-
-########################################################################
-# SECTION FOUR                                                         #
-# ============                                                         #
-#                                                                      #
-# We can now select which features to pass to the model, encoding      #
-# non-numeric data appropriately.                                      #
-#                                                                      #
-########################################################################
-
-# Split dataset into training data and test data - this is a standard way of splitting data as per https://www.datacamp.com/community/tutorials/random-forests-classifier-python#building
-print("Splitting data")
-# Select default values
-features = ["avg_score", "assess_count", "weighted_scores", "exam_score"]
-
-# Add extra values that have been encoded
-encFeats = []#"region", "imd_band", "highest_education", "gender"]
-ntsFeats = ["region", "imd_band", "highest_education", "gender"]
-for feat in encFeats:
-    print("Encoding {}".format(feat))
-    encode(students, feat)
-    for i in range(OutCats):
-        features.append("{}_{}".format(feat, i))
+        # Some features need to be expressed in new columns
+        yearVal = 1 if row['code_presentation'][3] == '4' else 0
+        monthVal = 1 if row['code_presentation'][4] == 'J' else 0
+        year.append(yearVal)
+        month.append(monthVal)
         
-for s in ntsFeats:
-    str_to_num(students, s)
-    features.append("{}_numbers".format(s))
+        module_code = row['code_module'][0]
+        mb0Val = 1 if module_code in ['E', 'F', 'G'] else 0
+        mb1Val = 1 if module_code in ['C', 'D', 'G'] else 0
+        mb2Val = 1 if module_code in ['B', 'D', 'F'] else 0
+        modBit0.append(mb0Val)
+        modBit1.append(mb1Val)
+        modBit2.append(mb2Val)
+        
+        education = row['highest_education']
+        eb0Val = 1 if education in ['Lower Than A Level', 'HE Qualification'] else 0
+        eb1Val = 1 if education in ['A Level or Equivalent', 'HE Qualification'] else 0
+        eb2Val = 1 if education in ['Post Graduate Qualification'] else 0
+        eduBit0.append(eb0Val)
+        eduBit1.append(eb1Val)
+        eduBit2.append(eb2Val)
 
-# This is the final DataFrame from which we create a training and testing set    
-X = students[features]
+        region = row['region']
+        rb0Val = 1 if region in ['South Region', 'South West Region', 'Wales', 'West Midlands Region', 'Yorkshire Region'] else 0
+        rb1Val = 1 if region in ['North Region', 'North Western Region', 'Scotland', 'South East Region', 'Yorkshire Region'] else 0
+        rb2Val = 1 if region in ['Ireland', 'London Region', 'Scotland', 'South East Region', 'Wales', 'West Midlands Region'] else 0
+        rb3Val = 1 if region in ['East Midlands Region', 'London Region', 'North Western Region', 'South East Region', 'South West Region', 'West Midlands Region'] else 0
+        regBit0.append(rb0Val)
+        regBit1.append(rb1Val)
+        regBit2.append(rb2Val)
+        regBit3.append(rb3Val)
 
-print("Time taken now up to {time.time() - start} seconds")
+        # Other times exising columns can be altered
+        # Age
+        age_band = dataset.loc[i, 'age_band']
+        if age_band == '0-35':
+            age_num = 25
+        elif age_band == '35-55':
+            age_num = 45
+        else:
+            age_num = 65
+        dataset.loc[i, 'age_band'] = age_num
 
-# Library expects numerical labels so convert them using this mapping
-results_mapper = {"Withdrawn":0, "Fail":1, "Pass":2, "Distinction":3}
-y = students["final_result"].map(lambda k:results_mapper[k])
+        # IMD Band
+        imd_band = dataset.loc[i, 'imd_band']
+        imd_num = int(imd_band[0]) * 10 + 5 if type(imd_band) == str else 50
+        dataset.loc[i, 'imd_band'] = imd_num
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+        # Disability
+        dataset.loc[i, 'disability'] = 1 if row['disability'] == 'Y' else 0
 
-# Train a random forest
-print("Preparing training")
-rf_scores = []
-rf_sizes = range(10, 11)
-for n in rf_sizes:
-    rf = RandomForestClassifier(n_estimators=n, random_state=42)
-    rf.fit(X_train, y_train)
-    rf_scores.append(rf.score(X_test, y_test))
+        # Gender
+        dataset.loc[i, 'gender'] = 1 if row['gender'] == 'M' else 0
 
+    # When new columns were generated they must be added to the dataframe
+    dataset['year'] = year
+    dataset['month'] = month
+
+    dataset['modBit0'] = modBit0
+    dataset['modBit1'] = modBit1
+    dataset['modBit2'] = modBit2
+
+    dataset['eduBit0'] = eduBit0
+    dataset['eduBit1'] = eduBit1
+    dataset['eduBit2'] = eduBit2
+    
+    dataset['regBit0'] = regBit0
+    dataset['regBit1'] = regBit1
+    dataset['regBit2'] = regBit2
+    dataset['regBit3'] = regBit3
+
+    del year, yearVal
+    del month, monthVal
+
+    del modBit0, mb0Val
+    del modBit1, mb1Val
+    del modBit2, mb2Val
+
+    del eduBit0, eb0Val
+    del eduBit1, eb1Val
+    del eduBit2, eb2Val
+
+    del stuInfobar
+
+def datasetClean():         # Step 8
+    global dataset
+    dataset = dataset.drop([
+        'code_module',
+        'code_presentation',
+        'id_student',
+        'region',
+        'highest_education'
+    ], axis=1)
+
+def normalise(cols: list):  # Step 9
+    global dataset
+    # First calculate the total values for each row
+    # to get mean and std deviation values
+    totals = defaultdict(list)
+    mvBar = tqdm(iterable=dataset.iterrows(), total=len(dataset))
+    mvBar.set_description('Building stats')
+    for _, row in mvBar:
+        for col in cols:
+            totals[col].append(row[col])
+    means = {col: sum(totals[col])/len(totals[col]) if len(col) > 0 else 0 for col in totals}
+    variances = {col: sum((val - means[col])**2 for val in totals[col])/len(totals[col]) if len(totals[col]) > 0 else 0 for col in totals}
+    # Now apply stats to each row of dataset
+    normieBar = tqdm(iterable=dataset.iterrows(), total=len(dataset))
+    normieBar.set_description('Normalising dataset')
+    for i, row in normieBar:
+        for col in cols:
+            current = row[col]
+            dataset.loc[i, col] = (current - means[col])/np.sqrt(variances[col]) if variances[col] > 0 else 0
+
+#########################################################################
+# SECTION THREE                                                         #
+# =============                                                         #
+#                                                                       #
+# We now have a training set and testing set of data. This includes     #
+# features which are either normalised (mean: 0, variance: 1) or binary #
+#                                                                       #
+#           Normalised              |             Binary                #
+# ==================================|================================== #
+#            imd_band               |             gender                #
+#            age_band               |           disability              #
+#      num_of_prev_attempts         |              year                 #
+#         studied_credits           |             month                 #
+#         courseworkScore           |           modBit[0-2]             #
+#            examScore              |           eduBit[0-2]             #
+#       normCourseworkScore         |           regBit[0-3]             #
+#          normExamScore            |                                   #
+#            vleCount               |                                   #
+#                                   |                                   #
+#                                                                       #
+#########################################################################
+
+# Run the steps defined above
+howto()
+loadData()
+
+# Assessments
+gatherAssInfo()
+countStuMarks()
+enrollmentCount()
+assNorms()
+
+# Vles
+countVle()
+
+dataset = data['studentInfo'].copy()
+dataset['courseworkScore'] = 0
+dataset['examScore'] = 0
+dataset['normCourseworkScore'] = 0
+dataset['normExamScore'] = 0
+dataset['vleCount'] = 0
+coallesce()
+datasetClean()
+normalise([
+    'imd_band',
+    'age_band',
+    'num_of_prev_attempts',
+    'studied_credits',
+    'courseworkScore',
+    'examScore',
+    'normCourseworkScore',
+    'normExamScore',
+    'vleCount'
+])
+
+try:
+    dataset.to_csv('processed.csv')
+except PermissionError:
+    print('Failed to update processed.csv')
+finally:
+    print('Data converted')
+
+# Split dataset into train and test sets
+X_train, X_test, y_train, y_test = train_test_split(
+    dataset.drop(['final_result'], axis=1), dataset['final_result'],
+    test_size=0.3, random_state=42
+)
+# We can turn y_train and y_test into three binary series each
+wfMap = lambda res: 0 if res in ['Withdrawn', 'Fail'] else 1
+wpMap = lambda res: 0 if res in ['Withdrawn', 'Pass'] else 1
+wdMap = lambda res: 0 if res in ['Withdrawn', 'Distinction'] else 1
+
+yWF_train, yWF_test = pd.Series(map(wfMap, y_train)), pd.Series(map(wfMap, y_test))
+yWP_train, yWP_test = pd.Series(map(wpMap, y_train)), pd.Series(map(wpMap, y_test))
+yWD_train, yWD_test = pd.Series(map(wdMap, y_train)), pd.Series(map(wdMap, y_test))
+
+corrData = X_train.copy().drop([
+    'num_of_prev_attempts', 'modBit0', 'modBit1', 'modBit2',
+    'eduBit0', 'eduBit1', 'eduBit2', 'regBit0', 'regBit1', 'regBit2', 'regBit3',
+    'year', 'month'
+], axis=1)
+corrData['y'] = yWF_train
+correlation = corrData.corr()
+
+from matplotlib import pyplot as plt
+import seaborn as sns
+# https://towardsdatascience.com/better-heatmaps-and-correlation-matrix-plots-in-python-41445d0f2bec
+ax = sns.heatmap(
+    correlation,
+    vmin=-1, vmax=1, center=0,
+    cmap=sns.diverging_palette(20, 220, n=200),
+    square=True
+)
+ax.set_xticklabels(
+    ax.get_xticklabels(),
+    rotation=45,
+    horizontalalignment='right'
+)
+plt.title('Correlation heatmap')
+plt.savefig('Heatmap')
+
+from sklearn.ensemble import RandomForestClassifier
+rfc = RandomForestClassifier(n_estimators=100, random_state=42)
+rfc.fit(X_train, y_train)
+rfcScore = rfc.score(X_test, y_test)
+
+# Use feature importances to inform new model
+importances = sorted([(importance, feature) for importance, feature in zip(rfc.feature_importances_, X_train.columns)], key=lambda k: k[0], reverse=True)
+rfc_models = []
+index = [i for i in range(len(importances))]
+for i in index:
+    toDrop = [tup[1] for tup in importances[i+1:]]
+    print(toDrop)
+    rfc.fit(X_train.drop(toDrop, axis=1), y_train)
+    rfc_models.append(rfc.score(X_test.drop(toDrop, axis=1), y_test))
 
 # Analyse data
-from matplotlib import pyplot as plt
-plt.bar(range(len(rf.feature_importances_)), rf.feature_importances_)
-plt.title("Feature Importance")
-plt.ylabel("Importance")
-plt.xticks(range(len(features)), features, rotation = 25)
-
-
-plt.savefig("features")
+plt.barh(range(len(importances)), [tup[0] for tup in importances])
+plt.title("Feature Importance from Random Forest")
+plt.xlabel("Importance")
+plt.yticks(range(len(importances)), [tup[1] for tup in importances])
+plt.savefig("rfc_features")
 #plt.show()
+
+plt.scatter(rfc_models, index)
+plt.title('Model performances with n most important features')
+plt.ylabel('N features')
+plt.xlabel('Test score')
+for i, txt in enumerate(importances):
+    plt.annotate(txt[1], (rfc_models[i] + 0.005, index[i]))
+
+noise_train, noise_test = X_train.copy(), X_test.copy()
+noise_train['noise'], noise_test['noise'] = np.random.normal(size=len(X_train)), np.random.normal(size=len(X_test))
+noise_train['small_noise'], noise_test['small_noise'] = np.random.binomial(1, 0.995, size=len(X_train)), np.random.binomial(1, 0.995, size=len(X_test))
+noise_train['large_noise'], noise_test['large_noise'] = np.random.binomial(1, 0.5, size=len(X_train)), np.random.binomial(1, 0.5, size=len(X_test))
+noise_rfc = RandomForestClassifier(n_estimators=100, random_state=42)
+noise_rfc.fit(noise_train, y_train)
+noise_rfc.score(noise_test, y_test)
+
+plt.barh(range(len(noise_rfc.feature_importances_)), noise_rfc.feature_importances_)
+plt.title("Feature Importance with Noise")
+plt.xlabel("Importance")
+plt.yticks(range(len(noise_train.columns)), noise_train.columns)
+
+# Refined rfc model
+ref_rfc = RandomForestClassifier(n_estimators=100, random_state=42)
+ref_rfc.fit(X_train.filter(['normCourseworkScore', 'normExamScore'], axis=1), y_train)
+print('With 2 features score = ', ref_rfc.score(X_test.filter(['normCourseworkScore', 'normExamScore'], axis=1), y_test))
+ref_rfc.fit(X_train.filter(['normCourseworkScore', 'normExamScore', 'courseworkScore', 'examScore'], axis=1), y_train)
+print('With 4 features score = ', ref_rfc.score(X_test.filter(['normCourseworkScore', 'normExamScore', 'courseworkScore', 'examScore'], axis=1), y_test))
+ref_rfc.fit(X_train.filter(['normCourseworkScore', 'normExamScore', 'vleCount'], axis=1), y_train)
+print('With 3 features score = ', ref_rfc.score(X_test.filter(['normCourseworkScore', 'normExamScore', 'vleCount'], axis=1), y_test))
+
+
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.feature_selection import SelectKBest, f_classif
+logr = LogisticRegression(random_state=42, solver='liblinear')
+# We want to pick the n best features based on various criteria
+# First criteria feature importance from random forest
+threshold = 0.05
+toDrop = [col for col, importance in zip(X_train.columns, rfc.feature_importances_) if importance < threshold]
+logr.fit(X_train.drop(toDrop, axis=1), y_train)
+print('Score of logistic regression when using features of importance above threshold: {} as rated by  random forest: '.format(threshold), logr.score(X_test.drop(toDrop, axis=1), y_test))
+
+
+balanced_logr = LogisticRegression(random_state=42, solver='liblinear', class_weight='balanced')
+feats = ['normCourseworkScore', 'normExamScore', 'vleCount', 'imd_band', 'studied_credits']
+logr.fit(X_train.filter(feats, axis=1), yWF_train)
+balanced_logr.fit(X_train.filter(feats, axis=1), yWF_train)
+print('Score: ', logr.score(X_test.filter(feats, axis=1), yWF_test))
+print('Score: ', balanced_logr.score(X_test.filter(feats, axis=1), yWF_test))
+
+
+# Hyperparameters are fun
+trees = [t for t in range(1, 102, 5)]
+for tree_count in trees:
+    forest = RandomForestClassifier(n_estimators=tree_count, random_state=42)
+    forest.fit(X_train.filter(feats, axis=1), y_train)
+    print('With {} trees: '.format(tree_count), forest.score(X_test.filter(feats, axis=1), y_test))
+
+from sklearn.metrics import confusion_matrix
+pred = balanced_logr.predict(X_train.filter(feats, axis=1))
+confused = confusion_matrix(yWF_train, pred)
+print('Confusion Matrix ', confused)
